@@ -1,8 +1,37 @@
 'use strict';
 
 const crypto = require('crypto');
+const path = require('path');
 const axios = require('axios');
 const FormData = require('form-data');
+
+/**
+ * Derive the MIME type from a filename's extension.
+ *
+ * ACRCloud's identify endpoint uses the content-type hint to determine how to
+ * decode the audio.  Sending the wrong type (e.g. audio/mpeg for a WAV file)
+ * can cause the API to reject or mis-decode the sample.
+ *
+ * @param {string} filename
+ * @returns {string} MIME type string
+ */
+function getMimeType(filename) {
+  const ext = path.extname(filename).toLowerCase();
+  const mimeMap = {
+    '.mp3': 'audio/mpeg',
+    '.wav': 'audio/wav',
+    '.aac': 'audio/aac',
+    '.ogg': 'audio/ogg',
+    '.flac': 'audio/flac',
+    '.m4a': 'audio/mp4',
+    '.mp4': 'video/mp4',
+    '.webm': 'video/webm',
+    '.mov': 'video/quicktime',
+    '.avi': 'video/x-msvideo',
+    '.mkv': 'video/x-matroska',
+  };
+  return mimeMap[ext] || 'application/octet-stream';
+}
 
 /**
  * Build the HMAC-SHA1 signature required by the ACRCloud REST API.
@@ -51,7 +80,7 @@ async function recognizeAudio(audioBuffer, filename = 'sample.mp3', options = {}
   const signature = buildSignature(accessSecret, 'POST', endpoint, accessKey, timestamp);
 
   const form = new FormData();
-  form.append('sample', audioBuffer, { filename, contentType: 'audio/mpeg' });
+  form.append('sample', audioBuffer, { filename, contentType: getMimeType(filename) });
   form.append('access_key', accessKey);
   form.append('data_type', 'audio');
   form.append('signature_version', '1');
@@ -81,4 +110,4 @@ async function recognizeAudio(audioBuffer, filename = 'sample.mp3', options = {}
   }
 }
 
-module.exports = { recognizeAudio, buildSignature };
+module.exports = { recognizeAudio, buildSignature, getMimeType };

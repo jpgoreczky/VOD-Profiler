@@ -100,6 +100,10 @@ uploadBtn.addEventListener('click', async () => {
   try {
     let lastResponse = null;
 
+    // Resolve media duration once before the loop – avoids creating a new
+    // <video> element and object URL on every chunk iteration.
+    const durationSec = await getMediaDuration(selectedFile);
+
     for (let i = 0; i < totalChunks; i++) {
       const start = i * CHUNK_SIZE;
       const end = Math.min(start + CHUNK_SIZE, selectedFile.size);
@@ -112,8 +116,6 @@ uploadBtn.addEventListener('click', async () => {
       form.append('totalChunks', String(totalChunks));
       form.append('filename', selectedFile.name);
 
-      // Pass an estimated duration if we can extract it
-      const durationSec = await getMediaDuration(selectedFile);
       if (durationSec) form.append('totalDuration', String(durationSec));
 
       showProgress(i + 1, totalChunks);

@@ -9,18 +9,15 @@
  *
  * Request (multipart/form-data):
  *   chunk         – binary chunk data (required)
- *   uploadId      – unique session identifier (required)
+ *   uploadId      – unique session identifier (required, alphanumeric/dash/underscore)
  *   chunkIndex    – 0-based index of this chunk (required)
- *   totalChunks   – total number of chunks in this upload (required)
- *   filename      – original filename (required on chunk 0)
- *   totalDuration – total duration of the media in seconds (optional, used for
- *                   calculating per-chunk time offsets)
+ *   totalChunks   – total number of chunks in this upload (required, max 500)
+ *   filename      – original filename (sent with every chunk)
+ *   totalDuration – total duration of the media in seconds (optional, sent with every chunk)
  *
  * Response (JSON):
- *   { received: true, chunkIndex, uploadId }          – chunk accepted
- *   { done: true, uploadId, results: [...] }           – last chunk processed,
- *                                                        returns all ACRCloud
- *                                                        results
+ *   { received: true, chunkIndex, uploadId }     – chunk accepted, more expected
+ *   { done: true, uploadId, results: [...] }      – final chunk processed
  */
 
 require('dotenv').config();
@@ -33,6 +30,21 @@ const { recognizeAudio } = require('../src/services/acrcloud');
 const { parseACRResponse } = require('../src/services/parser');
 
 // ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+// uploadId must be alphanumeric + dash/underscore, max 64 chars.
+// This prevents path-traversal attacks when the value is used in path.join().
+const UPLOAD_ID_REGEX = /^[a-zA-Z0-9_-]{1,64}$/;
+
+// Guard against DoS – 500 × 4 MB ≈ 2 GB max upload
+const MAX_TOTAL_CHUNKS = 500;
+
+// Run up to 3 ACRCloud requests concurrently to reduce overall latency while
+// staying within ACRCloud's per-second rate limits.
+const CONCURRENCY_LIMIT = 3;
+
+// ---------------------------------------------------------------------------
 // Multer: store each chunk in memory (chunks are ≤ 4 MB by design)
 // ---------------------------------------------------------------------------
 const upload = multer({
@@ -43,50 +55,46 @@ const upload = multer({
 });
 
 // ---------------------------------------------------------------------------
-// In-process chunk registry
-// NOTE: On Vercel each request may land on a different lambda instance, so
-// for a production deployment you would replace this with an external store
-// (e.g. Vercel KV / Redis / S3).  For local dev and single-instance setups
-// the in-process map works correctly.
-// ---------------------------------------------------------------------------
-const chunkRegistry = new Map();
-
-// ---------------------------------------------------------------------------
-// Helpers
+// Async filesystem helpers
+// (non-blocking equivalents of the sync calls to avoid stalling the event loop)
 // ---------------------------------------------------------------------------
 
-function getTmpDir(uploadId) {
+async function getTmpDir(uploadId) {
   const dir = path.join(os.tmpdir(), 'vod-profiler', uploadId);
-  fs.mkdirSync(dir, { recursive: true });
+  await fs.promises.mkdir(dir, { recursive: true });
   return dir;
 }
 
-function saveChunk(uploadId, chunkIndex, buffer) {
-  const dir = getTmpDir(uploadId);
+async function saveChunk(uploadId, chunkIndex, buffer) {
+  const dir = await getTmpDir(uploadId);
   const chunkPath = path.join(dir, `chunk_${String(chunkIndex).padStart(5, '0')}`);
-  fs.writeFileSync(chunkPath, buffer);
+  await fs.promises.writeFile(chunkPath, buffer);
   return chunkPath;
 }
 
-function loadAllChunks(uploadId, totalChunks) {
-  const dir = getTmpDir(uploadId);
-  const buffers = [];
-  for (let i = 0; i < totalChunks; i++) {
-    const chunkPath = path.join(dir, `chunk_${String(i).padStart(5, '0')}`);
-    if (!fs.existsSync(chunkPath)) {
-      throw new Error(`Missing chunk ${i} for upload ${uploadId}`);
-    }
-    buffers.push(fs.readFileSync(chunkPath));
+/**
+ * Count received chunk files via the filesystem.
+ *
+ * Using the filesystem for completion tracking means the count is accurate
+ * even when consecutive requests land on different Vercel lambda instances
+ * (each instance shares the same /tmp filesystem within a deployment).
+ * An in-process Map would reset to zero on a cold instance and miscount.
+ */
+async function countReceivedChunks(uploadId) {
+  const dir = path.join(os.tmpdir(), 'vod-profiler', uploadId);
+  try {
+    const files = await fs.promises.readdir(dir);
+    return files.filter((f) => f.startsWith('chunk_')).length;
+  } catch {
+    return 0; // Directory does not exist yet
   }
-  return Buffer.concat(buffers);
 }
 
-function cleanupUpload(uploadId) {
+async function cleanupUpload(uploadId) {
   const dir = path.join(os.tmpdir(), 'vod-profiler', uploadId);
-  if (fs.existsSync(dir)) {
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
-  chunkRegistry.delete(uploadId);
+  try {
+    await fs.promises.rm(dir, { recursive: true, force: true });
+  } catch { /* ignore */ }
 }
 
 // ---------------------------------------------------------------------------
@@ -94,25 +102,38 @@ function cleanupUpload(uploadId) {
 // ---------------------------------------------------------------------------
 
 async function handler(req, res) {
-  // Only accept POST requests
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method Not Allowed' });
   }
 
-  // Parse the multipart form
-  await new Promise((resolve, reject) => {
-    upload.single('chunk')(req, res, (err) => {
-      if (err) reject(err);
-      else resolve();
+  // Parse the multipart form – wrap in try/catch so a multer error (e.g. file
+  // too large) is returned as a 400 rather than crashing with an unhandled
+  // promise rejection.
+  try {
+    await new Promise((resolve, reject) => {
+      upload.single('chunk')(req, res, (err) => {
+        if (err) reject(err);
+        else resolve();
+      });
     });
-  });
+  } catch (err) {
+    return res.status(400).json({ error: `Upload error: ${err.message}` });
+  }
 
   const { uploadId, chunkIndex: rawChunkIndex, totalChunks: rawTotalChunks, filename, totalDuration } = req.body;
 
-  // Validate required fields
-  if (!uploadId || rawChunkIndex === undefined || rawTotalChunks === undefined) {
-    return res.status(400).json({ error: 'Missing required fields: uploadId, chunkIndex, totalChunks' });
+  // Validate uploadId strictly to prevent path-traversal: the value is used
+  // directly in path.join() to build the /tmp directory path.
+  if (!uploadId || !UPLOAD_ID_REGEX.test(uploadId)) {
+    return res.status(400).json({
+      error: 'Invalid uploadId. Must be 1–64 characters: letters, numbers, hyphens, or underscores.',
+    });
   }
+
+  if (rawChunkIndex === undefined || rawTotalChunks === undefined) {
+    return res.status(400).json({ error: 'Missing required fields: chunkIndex, totalChunks' });
+  }
+
   if (!req.file) {
     return res.status(400).json({ error: 'No chunk data received' });
   }
@@ -126,66 +147,75 @@ async function handler(req, res) {
   if (chunkIndex >= totalChunks) {
     return res.status(400).json({ error: 'chunkIndex must be less than totalChunks' });
   }
+  if (totalChunks > MAX_TOTAL_CHUNKS) {
+    return res.status(400).json({ error: `totalChunks exceeds maximum of ${MAX_TOTAL_CHUNKS}` });
+  }
 
   // Persist this chunk to /tmp
   try {
-    saveChunk(uploadId, chunkIndex, req.file.buffer);
+    await saveChunk(uploadId, chunkIndex, req.file.buffer);
   } catch (err) {
     return res.status(500).json({ error: `Failed to save chunk: ${err.message}` });
   }
 
-  // Track received chunks
-  if (!chunkRegistry.has(uploadId)) {
-    chunkRegistry.set(uploadId, {
-      received: new Set(),
-      totalChunks,
-      filename: filename || 'upload.mp4',
-      totalDuration: totalDuration ? parseFloat(totalDuration) : null,
-    });
-  }
-  const session = chunkRegistry.get(uploadId);
-  session.received.add(chunkIndex);
+  // Count received chunks via the filesystem (see countReceivedChunks comment above)
+  const receivedCount = await countReceivedChunks(uploadId);
 
-  // If not all chunks have arrived yet, acknowledge and wait
-  if (session.received.size < totalChunks) {
+  if (receivedCount < totalChunks) {
     return res.status(200).json({
       received: true,
       chunkIndex,
       uploadId,
-      progress: `${session.received.size}/${totalChunks}`,
+      progress: `${receivedCount}/${totalChunks}`,
     });
   }
 
-  // All chunks received – assemble and process
-  let assembledBuffer;
-  try {
-    assembledBuffer = loadAllChunks(uploadId, totalChunks);
-  } catch (err) {
-    cleanupUpload(uploadId);
-    return res.status(500).json({ error: `Failed to assemble chunks: ${err.message}` });
-  }
-
-  // Split the assembled buffer into ACRCloud-friendly segments (≤ 60 s each).
-  // We approximate audio duration from file size assuming ~128 kbps.
-  const totalDurationSec = session.totalDuration || (assembledBuffer.length / (128 * 1024 / 8));
-  const segmentSize = 1 * 1024 * 1024; // 1 MB per ACRCloud request segment
-  const segments = [];
-  for (let offset = 0; offset < assembledBuffer.length; offset += segmentSize) {
-    segments.push(assembledBuffer.slice(offset, offset + segmentSize));
-  }
+  // All chunks received – process each chunk file directly against ACRCloud.
+  //
+  // Previous approach loaded ALL chunks into a single Buffer.concat() then
+  // split the result into 1 MB segments, holding the entire file in RAM twice
+  // transiently. Instead, we read and submit one chunk at a time (each ≤ 4 MB)
+  // in batches, so peak RAM stays at CONCURRENCY_LIMIT × MAX_CHUNK_SIZE.
+  const safeFilename = filename || 'upload.mp4';
+  const totalDurationSec = totalDuration ? parseFloat(totalDuration) : 0;
+  const tmpDir = path.join(os.tmpdir(), 'vod-profiler', uploadId);
 
   const allResults = [];
   const errors = [];
 
-  for (let i = 0; i < segments.length; i++) {
-    const segmentBuffer = segments[i];
-    const chunkStartSec = (i / segments.length) * totalDurationSec;
-    try {
-      const acrResponse = await recognizeAudio(segmentBuffer, session.filename);
-      const parsed = parseACRResponse(acrResponse, chunkStartSec);
-      allResults.push(...parsed);
-    } catch (err) {
-      errors.push({ segment: i, error: err.message });
+  for (let batchStart = 0; batchStart < totalChunks; batchStart += CONCURRENCY_LIMIT) {
+    const batchEnd = Math.min(batchStart + CONCURRENCY_LIMIT, totalChunks);
+    const batchPromises = [];
+
+    for (let ci = batchStart; ci < batchEnd; ci++) {
+      const chunkIdx = ci;
+      const chunkPath = path.join(tmpDir, `chunk_${String(chunkIdx).padStart(5, '0')}`);
+      const chunkStartSec = totalDurationSec > 0 ? (chunkIdx / totalChunks) * totalDurationSec : 0;
+
+      batchPromises.push(
+        fs.promises
+          .readFile(chunkPath)
+          .then((buf) => recognizeAudio(buf, safeFilename))
+          .then((acrResponse) => parseACRResponse(acrResponse, chunkStartSec))
+          .catch((err) => ({ _error: err.message, segment: chunkIdx, _fatal: err.code === 'ENOENT' }))
+      );
+    }
+
+    const batchResults = await Promise.all(batchPromises);
+    for (const result of batchResults) {
+      if (result && result._error !== undefined) {
+        if (result._fatal) {
+          // A chunk file is missing – indicates data corruption or a race condition.
+          // Fail fast with a clear error rather than returning incomplete results.
+          await cleanupUpload(uploadId);
+          return res.status(500).json({
+            error: `Missing chunk file for segment ${result.segment}. The upload may be incomplete or corrupted.`,
+          });
+        }
+        errors.push({ segment: result.segment, error: result._error });
+      } else {
+        allResults.push(...result);
+      }
     }
   }
 
@@ -198,7 +228,7 @@ async function handler(req, res) {
     return true;
   });
 
-  cleanupUpload(uploadId);
+  await cleanupUpload(uploadId);
 
   return res.status(200).json({
     done: true,

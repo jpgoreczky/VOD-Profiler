@@ -30,6 +30,9 @@ const apiLimiter = rateLimit({
 // Serve the static frontend
 app.use(express.static(path.join(__dirname, '..', 'public')));
 
+// Parse JSON bodies for /api/recognize URL-scan requests
+app.use(express.json({ limit: '4kb' }));
+
 // Mount API handlers
 app.post('/api/upload', apiLimiter, uploadHandler);
 app.post('/api/recognize', apiLimiter, recognizeHandler);
