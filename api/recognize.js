@@ -194,7 +194,11 @@ async function handler(req, res) {
       try {
         ({ buffer: audioBuffer, filename: audioFilename } = await extractYouTubeAudio(url));
       } catch (err) {
-        return res.status(502).json({ error: `YouTube extraction failed: ${err.message}` });
+        // COOKIE_MISSING → 503 Service Unavailable (server misconfiguration)
+        // COOKIE_EXPIRED → 503 Service Unavailable (credentials need refresh)
+        // Other ytdl errors → 502 Bad Gateway
+        const status = err.code === 'COOKIE_MISSING' || err.code === 'COOKIE_EXPIRED' ? 503 : 502;
+        return res.status(status).json({ error: err.message });
       }
 
       try {

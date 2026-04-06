@@ -1,6 +1,6 @@
 'use strict';
 
-const { isYouTubeUrl } = require('../src/services/youtube');
+const { isYouTubeUrl, parseCookieString, buildYtdlAgent } = require('../src/services/youtube');
 
 // ---------------------------------------------------------------------------
 // isYouTubeUrl
@@ -58,3 +58,94 @@ describe('isYouTubeUrl', () => {
     expect(isYouTubeUrl('http://www.youtube.com/watch?v=dQw4w9WgXcQ')).toBe(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// parseCookieString
+// ---------------------------------------------------------------------------
+describe('parseCookieString', () => {
+  test('parses a single name=value pair', () => {
+    const result = parseCookieString('SESSION_ID=abc123');
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({ name: 'SESSION_ID', value: 'abc123' });
+  });
+
+  test('parses multiple name=value pairs separated by semicolons', () => {
+    const result = parseCookieString('VISITOR_INFO=xyz; YSC=foo; SAPISID=bar');
+    expect(result).toHaveLength(3);
+    expect(result[0]).toMatchObject({ name: 'VISITOR_INFO', value: 'xyz' });
+    expect(result[1]).toMatchObject({ name: 'YSC', value: 'foo' });
+    expect(result[2]).toMatchObject({ name: 'SAPISID', value: 'bar' });
+  });
+
+  test('scopes all cookies to .youtube.com', () => {
+    const result = parseCookieString('A=1; B=2');
+    result.forEach((c) => {
+      expect(c.domain).toBe('.youtube.com');
+      expect(c.path).toBe('/');
+      expect(c.secure).toBe(true);
+    });
+  });
+
+  test('handles values that contain = signs', () => {
+    const result = parseCookieString('TOKEN=abc=def==');
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({ name: 'TOKEN', value: 'abc=def==' });
+  });
+
+  test('ignores entries without an = sign', () => {
+    const result = parseCookieString('GOOD=ok; BADTOKEN; ANOTHER=yes');
+    expect(result).toHaveLength(2);
+    expect(result.map((c) => c.name)).toEqual(['GOOD', 'ANOTHER']);
+  });
+
+  test('trims whitespace around names and values', () => {
+    const result = parseCookieString('  NAME  =  value  ');
+    expect(result[0].name).toBe('NAME');
+    expect(result[0].value).toBe('value');
+  });
+
+  test('returns empty array for empty string', () => {
+    expect(parseCookieString('')).toEqual([]);
+  });
+
+  test('returns empty array for null/undefined', () => {
+    expect(parseCookieString(null)).toEqual([]);
+    expect(parseCookieString(undefined)).toEqual([]);
+  });
+
+  test('returns empty array for non-string input', () => {
+    expect(parseCookieString(42)).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// buildYtdlAgent
+// ---------------------------------------------------------------------------
+describe('buildYtdlAgent', () => {
+  const originalEnv = process.env.YOUTUBE_COOKIE;
+
+  afterEach(() => {
+    // Restore the env var after each test.
+    if (originalEnv === undefined) {
+      delete process.env.YOUTUBE_COOKIE;
+    } else {
+      process.env.YOUTUBE_COOKIE = originalEnv;
+    }
+  });
+
+  test('returns cookieMissing=true when YOUTUBE_COOKIE is not set', () => {
+    delete process.env.YOUTUBE_COOKIE;
+    const { agent, cookieMissing } = buildYtdlAgent();
+    expect(cookieMissing).toBe(true);
+    expect(agent).toBeNull();
+  });
+
+  test('returns cookieMissing=false and a non-null agent when YOUTUBE_COOKIE is set', () => {
+    process.env.YOUTUBE_COOKIE = 'SESSION_ID=abc123; YSC=xyz';
+    const { agent, cookieMissing } = buildYtdlAgent();
+    expect(cookieMissing).toBe(false);
+    expect(agent).not.toBeNull();
+    expect(typeof agent).toBe('object');
+  });
+});
+
