@@ -353,10 +353,11 @@
 
   <!-- URL tab -->
   <div class="tab-panel" id="tab-url">
-    <label for="urlInput">Video URL (YouTube, Twitch VOD, direct link, etc.)</label>
-    <input type="url" id="urlInput" placeholder="https://..." />
+    <label for="urlInput">Video URL (YouTube, Twitch VOD, direct audio/video link, etc.)</label>
+    <input type="url" id="urlInput" placeholder="https://www.youtube.com/watch?v=... or https://example.com/audio.mp3" />
     <p style="margin-top: 0.6rem; font-size: 0.8rem; color: var(--text-muted);">
-      Note: the server will fetch and scan the audio from the provided URL.
+      YouTube URLs are handled natively — only the audio track is extracted, no full video download.
+      For other URLs the server fetches the audio directly (max 4 MB).
     </p>
     <button class="btn" id="urlScanBtn">Scan URL</button>
     <div class="status-msg" id="urlStatus"></div>

@@ -13,7 +13,7 @@
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
-const CHUNK_SIZE = 4 * 1024 * 1024; // 4 MB – stays under Vercel's 4.5 MB limit
+const CHUNK_SIZE = 3 * 1024 * 1024; // 3 MB – comfortably under Vercel's 4.5 MB payload limit
 
 // ---------------------------------------------------------------------------
 // DOM references
@@ -174,7 +174,8 @@ urlScanBtn.addEventListener('click', async () => {
   }
 
   urlScanBtn.disabled = true;
-  setStatus(urlStatus, 'Fetching and scanning audio…', '');
+  const isYouTube = /youtube\.com|youtu\.be/i.test(url);
+  setStatus(urlStatus, isYouTube ? 'Extracting YouTube audio and scanning…' : 'Fetching and scanning audio…', '');
   hideResults();
 
   try {

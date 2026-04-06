@@ -25,6 +25,7 @@ const axios = require('axios');
 const multer = require('multer');
 const { recognizeAudio } = require('../src/services/acrcloud');
 const { parseACRResponse } = require('../src/services/parser');
+const { isYouTubeUrl, extractYouTubeAudio } = require('../src/services/youtube');
 
 const MAX_FETCH_BYTES = parseInt(process.env.MAX_CHUNK_SIZE || '4194304', 10);
 
@@ -166,7 +167,7 @@ async function handler(req, res) {
       return res.status(400).json({ error: 'Missing or invalid "url" field' });
     }
 
-    // Validate URL format and block private/local addresses (SSRF protection)
+    // Validate URL format and protocol first (applies to all URL types)
     let parsedUrl;
     try {
       parsedUrl = new URL(url);
@@ -176,13 +177,41 @@ async function handler(req, res) {
     if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
       return res.status(400).json({ error: 'Only http and https URLs are allowed' });
     }
-    if (await isPrivateOrLocalUrl(parsedUrl)) {
-      return res.status(400).json({ error: 'Requests to private or local addresses are not allowed' });
-    }
 
     const startSecNum = startSec !== undefined ? parseFloat(startSec) : 0;
     if (isNaN(startSecNum)) {
       return res.status(400).json({ error: 'Invalid startSec value' });
+    }
+
+    // ---------------------------------------------------------------------------
+    // YouTube URL – extract audio-only stream via @distube/ytdl-core.
+    // Checked before the SSRF guard: youtube.com is always a public address and
+    // the audio is fetched through ytdl rather than a raw axios request.
+    // ---------------------------------------------------------------------------
+    if (isYouTubeUrl(url)) {
+      let audioBuffer;
+      let audioFilename;
+      try {
+        ({ buffer: audioBuffer, filename: audioFilename } = await extractYouTubeAudio(url));
+      } catch (err) {
+        return res.status(502).json({ error: `YouTube extraction failed: ${err.message}` });
+      }
+
+      try {
+        const acrResponse = await recognizeAudio(audioBuffer, audioFilename);
+        const results = parseACRResponse(acrResponse, startSecNum);
+        return res.status(200).json({ results });
+      } catch (err) {
+        const status = err.message.includes('credentials') ? 503 : 502;
+        return res.status(status).json({ error: err.message });
+      }
+    }
+
+    // ---------------------------------------------------------------------------
+    // Generic direct URL – SSRF check then fetch via axios.
+    // ---------------------------------------------------------------------------
+    if (await isPrivateOrLocalUrl(parsedUrl)) {
+      return res.status(400).json({ error: 'Requests to private or local addresses are not allowed' });
     }
 
     // Fetch the audio from the URL (with size limit to prevent OOM)
