@@ -1,0 +1,22 @@
+{
+  "functions": {
+    "api/upload.js": {
+      "maxDuration": 60,
+      "memory": 1024
+    },
+    "api/recognize.js": {
+      "maxDuration": 30,
+      "memory": 512
+    }
+  },
+  "rewrites": [
+    {
+      "source": "/api/(.*)",
+      "destination": "/api/$1"
+    },
+    {
+      "source": "/(.*)",
+      "destination": "/public/$1"
+    }
+  ]
+}
