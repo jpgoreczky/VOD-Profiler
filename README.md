@@ -1,145 +1,81 @@
-# VOD Profiler – DMCA Risk Scanner
+# VOD Profiler
 
-A full-stack application that lets streamers scan VODs for copyrighted music.
-Upload a video or audio file (or paste a URL) and the app fingerprints the
-audio via **ACRCloud**, then returns a detailed breakdown of identified
-copyrighted tracks with timestamps and DMCA risk flags.
+A full-stack DMCA risk scanner for streamers. Submit a video file or URL and
+the app fingerprints the audio via ACRCloud, returning a breakdown of
+identified copyrighted tracks with timestamps, confidence scores, and DMCA
+risk flags.
 
----
+Live: [vod-profiler.vercel.app](https://vod-profiler.vercel.app)
+
+## Architecture
+
+```
+User submits video file or URL
+              |
+              v
+Chunked Upload (4MB chunks via frontend JS)
+              |
+              v
+Express.js API (Vercel Serverless Functions)
+              |
+              v
+ACRCloud Audio Fingerprinting API
+              |
+              v
+Parsed Results: track title, artist, timestamps, confidence score, DMCA risk flag
+```
 
 ## Tech Stack
 
-| Layer      | Technology                              |
-|------------|-----------------------------------------|
-| Backend    | Node.js · Express.js                    |
-| Deployment | Vercel (Serverless Functions)           |
-| Audio ID   | ACRCloud REST API (HMAC-SHA1 auth)      |
-| Frontend   | HTML · Vanilla JS (no build step)       |
+- **Backend:** Node.js, Express.js
+- **Deployment:** Vercel (Serverless Functions)
+- **Audio Fingerprinting:** ACRCloud REST API (HMAC-SHA1 auth)
+- **Frontend:** HTML, Vanilla JavaScript
 
----
+## What This Project Demonstrates
 
-## Project Structure
+**Chunked Streaming Architecture:** Vercel serverless functions have a 4.5MB
+request payload limit. The frontend splits files into 4MB chunks and POSTs
+each independently. The server stores chunks in `/tmp` and reassembles them
+once all chunks arrive — enabling files 10x the default payload limit to
+process without timeout.
 
-```
-VOD-Profiler/
-├── api/
-│   ├── index.js          # Local dev Express server
-│   ├── upload.js         # Chunked upload + ACRCloud scan endpoint
-│   └── recognize.js      # Single-shot audio recognition endpoint
-├── src/
-│   └── services/
-│       ├── acrcloud.js   # ACRCloud API client (auth + HTTP)
-│       └── parser.js     # ACRCloud response → flagged-segment mapper
-├── public/
-│   ├── index.html        # Frontend UI
-│   └── app.js            # Chunked upload logic + results rendering
-├── tests/
-│   ├── acrcloud.test.js  # Signature-generation unit tests
-│   └── parser.test.js    # Response-parsing unit tests
-├── .env.example          # Environment variable template
-├── vercel.json           # Vercel deployment configuration
-└── package.json
-```
+**Third-Party API Integration:** ACRCloud uses HMAC-SHA1 signed requests for
+authentication. The signature is computed client-side and Base64-encoded on
+each request. The app parses the structured response to extract timestamps,
+match confidence scores, and map segments to DMCA risk levels.
 
----
+**Serverless Deployment:** The entire backend runs as Vercel Serverless
+Functions. `vercel.json` configures routing, memory limits, and timeout
+settings — no server management required.
 
-## Quick Start (local development)
+## Screenshots
 
-### 1. Clone & install dependencies
+### File Upload and Scan Results
+![VOD Profiler Scan](screenshots/file_upload.png)
+
+## How to Run Locally
+
+**Prerequisites:** Node.js installed, ACRCloud account for API credentials.
 
 ```bash
+# Clone and install dependencies
+git clone https://github.com/jpgoreczky/VOD-Profiler.git
+cd VOD-Profiler
 npm install
-```
 
-### 2. Configure environment variables
-
-```bash
+# Configure environment variables
 cp .env.example .env
+# Edit .env and add your ACRCloud credentials:
+# ACRCLOUD_HOST=identify-eu-west-1.acrcloud.com
+# ACRCLOUD_ACCESS_KEY=your_access_key
+# ACRCLOUD_ACCESS_SECRET=your_access_secret
+
+# Start the development server
+npm run dev
 ```
 
-Edit `.env` and fill in your ACRCloud credentials:
-
-```env
-ACRCLOUD_HOST=identify-eu-west-1.acrcloud.com
-ACRCLOUD_ACCESS_KEY=your_access_key
-ACRCLOUD_ACCESS_SECRET=your_access_secret
-```
-
-Sign up at [acrcloud.com](https://www.acrcloud.com/) to obtain credentials.
-
-### 3. Start the development server
-
-```bash
-npm run dev   # uses nodemon for auto-reload
-# or
-npm start
-```
-
-Open http://localhost:3000 in your browser.
-
----
-
-## Deployment (Vercel)
-
-1. Push the repository to GitHub.
-2. Import the project in the [Vercel dashboard](https://vercel.com/new).
-3. Add the environment variables (`ACRCLOUD_HOST`, `ACRCLOUD_ACCESS_KEY`,
-   `ACRCLOUD_ACCESS_SECRET`) in the Vercel project settings.
-4. Deploy – `vercel.json` configures the serverless function routes and
-   memory/timeout limits automatically.
-
----
-
-## API Reference
-
-### `POST /api/upload`
-
-Accepts one chunk of a large file upload.
-
-| Field           | Type   | Description                                  |
-|-----------------|--------|----------------------------------------------|
-| `chunk`         | file   | Binary chunk data (multipart/form-data)      |
-| `uploadId`      | string | Unique session ID for this upload            |
-| `chunkIndex`    | number | 0-based index of this chunk                  |
-| `totalChunks`   | number | Total chunks in the upload                   |
-| `filename`      | string | Original filename (required on first chunk)  |
-| `totalDuration` | number | *(optional)* Media duration in seconds       |
-
-**Response** (intermediate): `{ received: true, chunkIndex, uploadId, progress }`
-
-**Response** (final chunk): `{ done: true, uploadId, results: [...] }`
-
-Each `result` object:
-
-```json
-{
-  "trackTitle": "Blinding Lights",
-  "artist": "The Weeknd",
-  "album": "After Hours",
-  "timestampStart": "00:14:32",
-  "timestampEnd": "00:17:45",
-  "timestampStartSec": 872,
-  "timestampEndSec": 1065,
-  "confidenceScore": 92,
-  "dmcaRisk": "HIGH",
-  "acrid": "abc123xyz"
-}
-```
-
-DMCA Risk levels: `HIGH` (≥ 80%), `MEDIUM` (50–79%), `LOW` (< 50%).
-
-### `POST /api/recognize`
-
-Single-shot recognition for a small audio clip (≤ 4 MB).
-
-| Field      | Type   | Description                                    |
-|------------|--------|------------------------------------------------|
-| `audio`    | file   | Audio file (mp3, wav, aac, …)                 |
-| `startSec` | number | *(optional)* Time offset for timestamps (s)   |
-
-**Response**: `{ results: [...] }`
-
----
+Open `http://localhost:3000` in your browser.
 
 ## Running Tests
 
@@ -149,32 +85,53 @@ npm test
 
 Tests cover the ACRCloud signature builder and the response parser.
 
----
+## API Reference
 
-## Architecture Notes
+### `POST /api/upload`
+Accepts one chunk of a large file upload. Returns intermediate progress or
+final results on the last chunk.
 
-### Chunked Upload Strategy
+### `POST /api/recognize`
+Single-shot recognition for small audio clips (4MB or less).
 
-Vercel serverless functions have a **4.5 MB request payload limit**.  The
-frontend splits files into **4 MB chunks** (`CHUNK_SIZE = 4 * 1024 * 1024`)
-and POSTs each chunk independently.  The server stores chunks in `/tmp`
-(available on Vercel lambdas) and assembles them once all chunks have arrived.
+**Result object:**
+```json
+{
+  "trackTitle": "Blinding Lights",
+  "artist": "The Weeknd",
+  "timestampStart": "00:14:32",
+  "timestampEnd": "00:17:45",
+  "confidenceScore": 92,
+  "dmcaRisk": "HIGH"
+}
+```
 
-### ACRCloud Authentication
+**DMCA Risk Levels:**
 
-The API uses HMAC-SHA1 signed requests.  The signature string is:
+| Level | ACRCloud Confidence |
+|---|---|
+| HIGH | 80% and above |
+| MEDIUM | 50 to 79% |
+| LOW | Below 50% |
+
+## Project Structure
 
 ```
-POST\n/v1/identify\n<access_key>\naudio\n1\n<unix_timestamp>
+VOD-Profiler/
+├── api/
+│   ├── index.js          # Local dev Express server
+│   ├── upload.js         # Chunked upload + ACRCloud scan endpoint
+│   └── recognize.js      # Single-shot recognition endpoint
+├── src/services/
+│   ├── acrcloud.js       # ACRCloud API client (auth + HTTP)
+│   └── parser.js         # ACRCloud response to flagged-segment mapper
+├── public/
+│   ├── index.html        # Frontend UI
+│   └── app.js            # Chunked upload logic + results rendering
+├── tests/
+│   ├── acrcloud.test.js  # Signature generation unit tests
+│   └── parser.test.js    # Response parsing unit tests
+├── .env.example          # Environment variable template
+├── vercel.json           # Vercel deployment configuration
+└── package.json
 ```
-
-The signature is computed with `crypto.createHmac('sha1', accessSecret)` and
-Base64-encoded.
-
-### DMCA Risk Levels
-
-| Level    | ACRCloud Confidence |
-|----------|---------------------|
-| HIGH     | ≥ 80%               |
-| MEDIUM   | 50 – 79%            |
-| LOW      | < 50%               |
